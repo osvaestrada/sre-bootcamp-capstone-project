@@ -67,5 +67,5 @@ terraform plan
 
 4. To deploy the IAC run:
 ```bash
-terraform applu
+terraform apply
 ```

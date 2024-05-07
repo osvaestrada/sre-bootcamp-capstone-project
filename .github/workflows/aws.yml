@@ -1,0 +1,163 @@
+name: Deploy to Amazon ECS
+
+on:
+  push: # This will change to pull_request
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  tests:
+    name: Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [12.x]
+    steps:
+    - uses: actions/checkout@v2
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v1
+      with:
+        node-version: ${{ matrix.node-version }}
+    - run: npm install
+    - run : npm run test
+  deployDev:
+    name: Deploy to Dev
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: tests
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3 
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: sre-bootcamp-dev
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        # Build a docker container and
+        # push it to ECR so that it can
+        # be deployed to ECS.
+        docker build --build-arg PORT=${{ secrets.PORT }} --build-arg DB_USER=${{ secrets.DB_USER }}  --build-arg DB_PASSWORD=${{ secrets.DB_PASSWORD }} --build-arg DB_NAME=${{ secrets.DB_NAME }} --build-arg HOST=${{ secrets.HOST }} --build-arg SECRET=${{ secrets.SECRET }} -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+      
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+      with:
+        terraform_wrapper: false
+      
+    - name: Terraform Init
+      id: init
+      run: terraform init -backend-config="access_key=${{ secrets.AWS_ACCESS_KEY_ID }}" -backend-config="secret_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+       -var "pass=${{ secrets.DB_PASSWORD }}" -var "username=${{ secrets.USERNAME }}" -var "image_tag=${{ github.sha }}" -no-color -input=false
+      working-directory: ./terraform/dev
+    
+    - name: Terraform plan
+      if: steps.build-image.outcome == 'success'
+      run: terraform plan
+        -var "pass=${{ secrets.DB_PASSWORD }}" -var "username=${{ secrets.USERNAME }}" -var "image_tag=${{ github.sha }}" -no-color -input=false
+      working-directory: ./terraform/dev
+    
+    - name: Deploy to development
+      id: apply
+      if: steps.build-image.outcome == 'success'
+      run: terraform apply -auto-approve  -input=false
+        -var "pass=${{ secrets.DB_PASSWORD }}" -var "username=${{ secrets.USERNAME }}" -var "image_tag=${{ github.sha }}"
+      working-directory: ./terraform/dev
+
+  deployInteg:
+    name: Deploy to Integ
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    needs: tests
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3 
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: sre-bootcamp-integ
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        # Build a docker container and
+        # push it to ECR so that it can
+        # be deployed to ECS.
+        docker build --build-arg PORT=${{ secrets.PORT }} --build-arg DB_USER=${{ secrets.DB_USER }}  --build-arg DB_PASSWORD=${{ secrets.DB_PASSWORD }} --build-arg DB_NAME=${{ secrets.DB_NAME }} --build-arg HOST=${{ secrets.HOST }} --build-arg SECRET=${{ secrets.SECRET }} -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+      
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+      with:
+        terraform_wrapper: false
+      
+    - name: Terraform Init
+      id: init
+      run: terraform init -backend-config="access_key=${{ secrets.AWS_ACCESS_KEY_ID }}" -backend-config="secret_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+       -var "pass=${{ secrets.DB_PASSWORD }}" -var "username=${{ secrets.USERNAME }}" -var "image_tag=${{ github.sha }}" -no-color -input=false
+      working-directory: ./terraform/integ
+    
+    - name: Terraform plan
+      if: steps.build-image.outcome == 'success'
+      run: terraform plan
+        -var "pass=${{ secrets.DB_PASSWORD }}" -var "username=${{ secrets.USERNAME }}" -var "image_tag=${{ github.sha }}" -no-color -input=false
+      working-directory: ./terraform/integ
+    
+    - name: Deploy to development
+      id: apply
+      if: steps.build-image.outcome == 'success'
+      run: terraform apply -auto-approve  -input=false
+        -var "pass=${{ secrets.DB_PASSWORD }}" -var "username=${{ secrets.USERNAME }}" -var "image_tag=${{ github.sha }}"
+      working-directory: ./terraform/integ
+
+
+    # - name: Fill in the new image ID in the Amazon ECS task definition
+    #   id: task-def
+    #   uses: aws-actions/amazon-ecs-render-task-definition@v1
+    #   with:
+    #     task-definition: ./terraform/modules/sre-bootcamp/rendered/task-definition.json
+    #     container-name: ${{ env.CONTAINER_NAME }}
+    #     image: ${{ steps.build-image.outputs.image }}
+
+    # - name: Deploy Amazon ECS task definition
+    #   uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+    #   with:
+    #     task-definition: ${{ steps.task-def.outputs.task-definition }}
+    #     service: ${{ env.ECS_SERVICE }}
+    #     cluster: ${{ env.ECS_CLUSTER }}
+    #     wait-for-service-stability: true

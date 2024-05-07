@@ -1,0 +1,97 @@
+name: Create and Publish Docker Image, Deploy terraform infrastructure
+
+on:
+  workflow_call:
+    inputs:
+      aws-region:
+        required: true
+        type: string
+      environmet:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+    # secrets:
+    #   AWS_ACCESS_KEY_ID:
+    #     required: true
+    #   AWS_SECRET_ACCESS_KEY:
+    #     required: true
+    #   PORT: 
+    #     required: true
+    #   DB_USER:
+    #     required: true
+    #   DB_PASSWORD:
+    #     required: true
+    #   DB_NAME:
+    #     required: true
+    #   HOST:
+    #     required: true
+    #   SECRET:
+    #     required: true
+jobs:
+  build:
+    name: Build and Push Image
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: sre-bootcamp-${{ inputs.environmet }}
+        IMAGE_TAG: ${{ inputs.tag }}
+      run: |
+        # Build a docker container and
+        # push it to ECR so that it can
+        # be deployed to ECS.
+        docker build --build-arg PORT=${{ secrets.PORT }} --build-arg DB_USER=${{ secrets.DB_USER }}  --build-arg DB_PASSWORD=${{ secrets.DB_PASSWORD }} --build-arg DB_NAME=${{ secrets.DB_NAME }} --build-arg HOST=${{ secrets.HOST }} --build-arg SECRET=${{ secrets.SECRET }} -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+  deployWithTerraform:
+    name: Deploy with Terraform
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    steps:
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+      with:
+        terraform_wrapper: false
+      
+    - name: Terraform Init
+      id: init
+      run: terraform init -backend-config="access_key=${{ secrets.AWS_ACCESS_KEY_ID }}" -backend-config="secret_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+       -var "pass=${{ secrets.DB_PASSWORD }}" -var "username=${{ secrets.USERNAME }}" -var "image_tag=${{ inputs.tag }}" -no-color -input=false
+      working-directory: ./terraform/${{ inputs.environmet }}
+    
+    - name: Terraform plan
+      # if: steps.build-image.outcome == 'success'
+      run: terraform plan
+        -var "pass=${{ secrets.DB_PASSWORD }}" -var "username=${{ secrets.USERNAME }}" -var "image_tag=${{ inputs.tag }}" -no-color -input=false
+      working-directory: ./terraform/${{ inputs.environmet }}
+    
+    # - name: Deploy to development
+    #   id: apply
+    #   # if: steps.build-image.outcome == 'success'
+    #   run: terraform apply -auto-approve  -input=false
+    #     -var "pass=${{ secrets.DB_PASSWORD }}" -var "username=${{ secrets.USERNAME }}" -var "image_tag=${{ inputs.tag }}"
+    #   working-directory: ./terraform/${{ inputs.environmet }}
+
+  
+      
